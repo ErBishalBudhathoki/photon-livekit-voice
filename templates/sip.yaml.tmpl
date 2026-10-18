@@ -1,0 +1,23 @@
+# livekit-sip config. Rendered by bootstrap/10-stack.sh into sip.yaml.
+log_level: info
+api_key: __LIVEKIT_API_KEY__
+api_secret: __LIVEKIT_API_SECRET__
+ws_url: ws://127.0.0.1:__LIVEKIT_API_PORT__
+redis:
+  address: 127.0.0.1:__REDIS_PORT__
+sip_port: __SIP_PORT__
+# The UDP range the carrier sends RTP to. BOTH firewall layers (the cloud
+# security list AND the host firewall) must allow this range inbound, or calls
+# set up fine and carry no audio.
+rtp_port: __RTP_PORT_RANGE__
+use_external_ip: true
+media_use_external_ip: true
+# No inbound trunk registers to this listener; calls arrive on the TLS port only.
+hide_inbound_port: true
+# ALPN is intentionally omitted, which leaves the livekit-sip default ["sip"].
+# If the provider's SBC rejects that ALPN, add:  alpn: []
+tls:
+  port: __SIP_TLS_PORT__
+  certs:
+    - cert_file: __TLS_CERT_FILE__
+      key_file: __TLS_KEY_FILE__

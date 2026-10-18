@@ -1,0 +1,21 @@
+[Unit]
+Description=LiveKit voice agent worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_DIR__/agent
+Environment=PYTHONUNBUFFERED=1
+# The .env in the repo root is the single source of truth for the worker; the
+# loader inside the agent reads it. Pointing at it here too keeps `systemctl
+# show-environment` honest about what a running worker actually has.
+EnvironmentFile=-__REPO_DIR__/.env
+ExecStart=__REPO_DIR__/venv/bin/python __REPO_DIR__/agent/agent.py start
+Restart=always
+RestartSec=5
+# Give the worker time to leave the room and close its transcript on shutdown.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

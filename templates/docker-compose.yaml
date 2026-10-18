@@ -1,0 +1,49 @@
+# LiveKit + SIP, host networking. Read this before changing anything:
+#
+# * network_mode: host is REQUIRED, not a preference. The SIP service must send and
+#   receive RTP on the exact UDP ports the carrier was told about, and a bridge
+#   network would NAT them away - calls connect and then have no audio at all.
+# * Redis holds the SIP trunks, dispatch rules and room state. It is on a named
+#   volume WITH persistence on purpose: a cache-only Redis (--save '' --appendonly
+#   no) silently loses the phone line across a restart - every container reports
+#   healthy and every call fails.
+#
+# Values come from .env in this directory (docker compose reads it automatically).
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: livekit-redis
+    network_mode: host
+    restart: unless-stopped
+    command: ["redis-server", "--port", "${REDIS_PORT:-6380}",
+              "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - livekit-redis-data:/data
+
+  livekit:
+    image: livekit/livekit-server:${LIVEKIT_SERVER_TAG:-v1.13.10}
+    container_name: livekit-server
+    network_mode: host
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  sip:
+    image: livekit/sip:${LIVEKIT_SIP_TAG:-v1.19.0}
+    container_name: livekit-sip
+    network_mode: host
+    restart: unless-stopped
+    # The image entrypoint is hardcoded to `livekit-sip --config=/sip/config.yaml`;
+    # SIP_CONFIG_FILE / SIP_CONFIG_BODY are NOT honoured by v1.19.0.
+    volumes:
+      - ./sip.yaml:/sip/config.yaml:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - redis
+      - livekit
+
+volumes:
+  livekit-redis-data:

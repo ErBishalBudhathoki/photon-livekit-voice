@@ -1,0 +1,24 @@
+# livekit-server config. Rendered by bootstrap/10-stack.sh - do not edit the
+# rendered livekit.yaml by hand, it is overwritten on every run.
+port: __LIVEKIT_API_PORT__
+bind_addresses:
+  - ""
+rtc:
+  tcp_port: __RTC_TCP_PORT__
+  udp_port: __RTC_UDP_PORT__
+  # Required behind a cloud NAT: the server advertises the host's public IP in its
+  # ICE candidates. Without it, media is offered on the private address and calls
+  # connect with no audio.
+  use_external_ip: true
+redis:
+  address: 127.0.0.1:__REDIS_PORT__
+keys:
+  __LIVEKIT_API_KEY__: __LIVEKIT_API_SECRET__
+logging:
+  level: info
+  json: false
+room:
+  auto_create: true
+  empty_timeout: 300
+turn:
+  enabled: false

@@ -1,0 +1,4 @@
+name: voice-call
+version: "1.0.0"
+description: "Slash commands that make the voice agent place a real phone call over the SIP trunk: /callme rings your own phone, /call <number> <reason> rings someone else and follows the reason as its brief, /calllog reprints the transcript of the last call."
+author: "photon-livekit-voice"

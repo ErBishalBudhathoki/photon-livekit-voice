@@ -1,0 +1,25 @@
+# Rendered from the templates - never commit the real ones. Anchor to the repo
+# root: an unanchored "docker-compose.yaml" also hides templates/docker-compose.yaml.
+/livekit.yaml
+/sip.yaml
+/docker-compose.yaml
+/.env
+
+# Credentials and certificates.
+certs/
+*.pem
+*.key
+*.crt
+
+# Call transcripts: they contain real conversations.
+calls/
+*.jsonl
+
+# Build and runtime artefacts.
+venv/
+__pycache__/
+*.pyc
+*.log
+*.bak
+*.bak.*
+.uv/

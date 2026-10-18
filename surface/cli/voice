@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# The terminal surface, for people who are not using Hermes.
+#
+# A thin wrapper: it resolves the repo, runs the dialer in a clean environment,
+# and prints the transcript when the call is over. The clean environment is not
+# cosmetic - if this venv's interpreter inherits another Python's PYTHONPATH, its
+# cryptography wheel fails to import with "undefined symbol: PyType_GetName" and
+# it looks like a broken install rather than a leaked variable.
+#
+#   voice call +61400000000 "ask about Saturday hours"
+#   voice callme
+#   voice list                     trunks and rooms, as the dialer sees them
+#   voice log [room]               print a transcript (default: the newest)
+#   voice wait [room]              follow a call and print the briefing at the end
+set -euo pipefail
+
+REPO="${PHOTON_VOICE_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+PY="$REPO/venv/bin/python"
+DIALER="$REPO/cli/call_cli.py"
+CALLS="${AGENT_CALL_LOG_DIR:-$REPO/calls}"
+
+[ -x "$PY" ] || { echo "no venv at $PY - run: bash $REPO/bootstrap/40-agent.sh"; exit 1; }
+[ -f "$DIALER" ] || { echo "no dialer at $DIALER"; exit 1; }
+
+run() {
+  env -u PYTHONPATH -u PYTHONHOME -u PYTHONSTARTUP -u PYTHONEXECUTABLE -u VIRTUAL_ENV \
+      -u LD_LIBRARY_PATH -u LD_PRELOAD \
+      "$PY" "$@"
+}
+
+newest_room() {
+  ls -t "$CALLS"/*.jsonl 2>/dev/null | head -1 | xargs -r basename | sed 's/\.jsonl$//'
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  call)
+    [ $# -ge 1 ] || { echo "usage: voice call <number> [instruction]"; exit 2; }
+    number="$1"; shift || true
+    instruction="${*:-}"
+    run "$DIALER" --to "$number" ${instruction:+--instruction "$instruction"}
+    ;;
+  callme)
+    run "$DIALER" --mode callme
+    ;;
+  list)
+    run "$DIALER" --list
+    ;;
+  log)
+    room="${1:-$(newest_room)}"
+    [ -n "$room" ] || { echo "no transcripts in $CALLS yet"; exit 1; }
+    file="$CALLS/$room.jsonl"
+    [ -f "$file" ] || { echo "no transcript for room '$room' in $CALLS"; exit 1; }
+    echo "=== $room ==="
+    "$PY" - "$file" <<'PY'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    kind = rec.get("type")
+    if kind == "call":
+        print(f"  call      {rec.get('mode')} -> {rec.get('callee')}")
+        if rec.get("instruction"):
+            print(f"  brief     {rec['instruction']}")
+    elif kind == "answered":
+        print(f"  answered  after {rec.get('waited_s')}s")
+    elif kind in ("said", "heard"):
+        who = "agent" if kind == "said" else "caller"
+        final = "" if rec.get("final") else " (partial)"
+        print(f"  {who:<9} {rec.get('text','')}{final}")
+    elif kind == "ended":
+        print(f"  ended     {rec.get('reason')} at {rec.get('at')}")
+PY
+    ;;
+  wait)
+    room="${1:-$(newest_room)}"
+    [ -n "$room" ] || { echo "no transcripts in $CALLS yet"; exit 1; }
+    file="$CALLS/$room.jsonl"
+    echo "waiting for $room to end ..."
+    for _ in $(seq 1 180); do
+      if grep -q '"type": *"ended"' "$file" 2>/dev/null; then
+        # The worker writes 'ended' at hangup and the SDK flushes a farewell
+        # afterwards, so settle before reading rather than trusting the order.
+        sleep 8
+        exec "$0" log "$room"
+      fi
+      sleep 5
+    done
+    echo "still running after 15 minutes; check: $file"
+    ;;
+  ""|-h|--help)
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown command: $cmd (try: call, callme, list, log, wait)"; exit 2
+    ;;
+esac
