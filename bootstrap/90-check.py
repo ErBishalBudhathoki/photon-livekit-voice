@@ -179,15 +179,49 @@ async def rung_credentials() -> None:
     if env("PHOTON_API_KEY") and env("PHOTON_PROJECT_ID") and env("PHOTON_VOICE_PROFILE_ID"):
         path = (f"/v1/projects/{env('PHOTON_PROJECT_ID')}/platforms/voice/profiles/"
                 f"{env('PHOTON_VOICE_PROFILE_ID')}")
-        req = urllib.request.Request("https://api.photon.codes" + path, headers={
-            "Authorization": "Bearer " + env("PHOTON_API_KEY"),
-            "Accept": "application/json", "User-Agent": UA})
+
+        def provider_get(api_path: str) -> tuple[int | None, bytes]:
+            req = urllib.request.Request(
+                "https://api.photon.codes" + api_path,
+                headers={"Authorization": "Bearer " + env("PHOTON_API_KEY"),
+                         "Accept": "application/json", "User-Agent": UA})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.read()
+            except Exception as exc:  # noqa: BLE001
+                return None, f"{type(exc).__name__}: {exc}".encode()
+
+        status, body = provider_get(path)
+        if status != 200:
+            # Measured against this API, and each one points somewhere different:
+            # 401 = the key is missing or not accepted, 403 = the request carried no
+            # User-Agent (their edge blocks bare clients), 404 = the project or profile
+            # id is wrong. They separate cleanly, so name the one thing to fix rather
+            # than "the provider refused us".
+            if status == 401:
+                hint = " - PHOTON_API_KEY is missing, expired, or not accepted"
+            elif status == 403:
+                hint = (" - this API answers 403 to a client that sends no User-Agent; "
+                        "this check sends one, so something stripped the header (a proxy?) "
+                        "or another client is hitting the API")
+            elif status == 404:
+                hint = (" - no such route: PHOTON_PROJECT_ID or PHOTON_VOICE_PROFILE_ID is "
+                        "wrong, or the profile was deleted")
+            elif status == 422:
+                hint = (" - the id is malformed (wrong prefix or length) - copy "
+                        "PHOTON_VOICE_PROFILE_ID out of the provider dashboard again")
+            else:
+                hint = ""
+            record("2. credentials", FAIL, "provider profile readable",
+                   f"HTTP {status}{hint}")
+            return
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                profile = json.loads(r.read() or b"{}")
-        except Exception as exc:  # noqa: BLE001
-            record("2. credentials", WARN, "provider profile readable",
-                   f"{type(exc).__name__}: {exc}")
+            profile = json.loads(body or b"{}")
+        except ValueError as exc:
+            record("2. credentials", FAIL, "provider profile readable",
+                   f"HTTP 200 but the body is not JSON: {exc}")
             return
         # The profile nests everything under "configuration" - reading the top
         # level finds nothing and reports a perfectly good setup as broken.
@@ -199,19 +233,32 @@ async def rung_credentials() -> None:
                "provider points at this host",
                f"destinationUri={got!r}" if got else "no inbound destination set - run 30-photon.py")
 
-        # What Photon presents when it sends an INVITE to our trunk. If this is
-        # not our trunk's username, every inbound call is rejected with a 403 the
-        # caller hears as "number not available".
+        # What Photon presents when it sends an INVITE to our trunk. A provider that
+        # has a destination but no credential invites unauthenticated, the trunk
+        # rejects it with 403, and the caller hears "this number is not available" -
+        # so a missing username is a broken inbound, not a note to read later. The
+        # password is never returned by the API; the trunk half of that comparison
+        # happened above, against .env.
         creds = inbound.get("credentials")
         got_user = creds.get("username") if isinstance(creds, dict) else ""
-        if not got_user:
-            record("2. credentials", WARN, "provider credential matches our trunk",
-                   "the profile does not expose an inbound username (only a credential "
-                   "blob) - compare it in the provider dashboard if inbound calls 403")
-        else:
-            record("2. credentials", PASS if got_user == env("SIP_INBOUND_USER") else FAIL,
+        trunk_user = (trunk.auth_username if trunk else "") or ""
+        env_user = env("SIP_INBOUND_USER") or ""
+        if got_user:
+            agree = got_user == env_user == trunk_user
+            record("2. credentials", PASS if agree else FAIL,
                    "provider credential matches our trunk",
-                   f"username={got_user!r} vs {env('SIP_INBOUND_USER')!r}")
+                   f"provider={got_user!r} trunk={trunk_user!r} env={env_user!r} "
+                   f"(the provider never returns the password, so that half is the "
+                   f"trunk-vs-.env check above)")
+        elif inbound:
+            record("2. credentials", FAIL, "provider credential matches our trunk",
+                   "the provider has an inbound destination but no credential username, "
+                   "so it will INVITE unauthenticated and every inbound call will be "
+                   "rejected - re-run bootstrap/30-photon.py")
+        else:
+            record("2. credentials", WARN, "provider credential matches our trunk",
+                   "the provider has no inbound configuration yet - run "
+                   "bootstrap/30-photon.py")
 
         # The outbound side is asymmetric: the provider's profile advertises a
         # rotated username (v...) while the trunk authenticates with the one it was

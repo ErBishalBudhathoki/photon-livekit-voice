@@ -26,21 +26,27 @@ for arg in "$@"; do
 done
 
 # ---- 1. interpreter ---------------------------------------------------------
+# Prefer uv: it pins CPython 3.10 no matter what the host ships, which is what
+# makes this installer behave the same on a box whose only python3 is 3.13. Fall
+# back to any system python3 >= 3.10 (checked, not guessed from a version list).
+PINNED_PY="${PINNED_PY:-3.10}"
 PY=""
-for candidate in python3.10 python3.11 python3.12; do
-  if command -v "$candidate" >/dev/null 2>&1; then PY="$candidate"; break; fi
+for candidate in python3 python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$candidate" >/dev/null 2>&1 \
+     && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    PY="$candidate"; break
+  fi
 done
-[ -n "$PY" ] || { echo "no python3.10+ on PATH - the worker needs 3.10 or newer"; exit 1; }
-echo "using $($PY -V 2>&1)"
 
 # ---- 2. venv ----------------------------------------------------------------
 # uv when available (much faster, and it resolves the pinned set cleanly);
 # otherwise the stdlib venv. Either way the venv lives in the repo.
 if [ ! -x venv/bin/python ]; then
   if command -v uv >/dev/null 2>&1; then
-    echo "creating venv with uv ($PY)"
-    uv venv --python "$PY" venv
+    echo "creating venv with uv (pinned to Python $PINNED_PY)"
+    uv venv --python "$PINNED_PY" venv
   else
+    [ -n "$PY" ] || { echo "no python3.10+ on PATH and no uv - install either"; exit 1; }
     echo "creating venv with $PY -m venv"
     "$PY" -m venv venv
     venv/bin/python -m pip install --quiet --upgrade pip

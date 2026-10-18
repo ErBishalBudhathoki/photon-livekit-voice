@@ -104,7 +104,7 @@ configs that contain one are written mode 600.
 |---|---|---|
 | 0 | `bootstrap/00-preflight.py` | `.env` complete, DNS not proxied, cert covers the name, ports free, provider line voice-eligible |
 | 1 | `bootstrap/10-stack.sh` | renders configs, starts redis/livekit/sip, API answers, no crash loop |
-| 2 | `bootstrap/20-sip-objects.py` | inbound trunk + dispatch rule exist, and the trunk's credentials equal `.env` |
+| 2 | `bootstrap/40-agent.sh --no-unit` then `bootstrap/20-sip-objects.py` | the worker venv exists (gate 2 imports `livekit-api`, so it cannot run without it), then: inbound trunk + dispatch rule exist, and the trunk's credentials equal `.env` |
 | 3 | `bootstrap/30-photon.py` | provider outbound credential issued, LiveKit trunk created, provider inbound destination points back here |
 | 4 | `bootstrap/40-agent.sh` | worker venv built, service installed, **"registered worker" seen in the log** |
 | 5 | `bootstrap/50-dialer.sh` | the dialer reaches the API and sees the trunk |

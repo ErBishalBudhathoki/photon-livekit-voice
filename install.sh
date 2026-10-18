@@ -27,7 +27,8 @@ if [ "${1:-}" = "--check" ]; then
   step "verifying the existing install (no changes)"
   python3 bootstrap/00-preflight.py
   step "the ladder"
-  venv/bin/python bootstrap/90-check.py
+  # 90-check.py re-execs into the venv itself, so this works from any interpreter.
+  python3 bootstrap/90-check.py
   exit $?
 fi
 
@@ -37,25 +38,15 @@ python3 bootstrap/00-preflight.py || { echo; echo "Preflight failed. Nothing was
 step "gate 1/5  the LiveKit stack"
 bash bootstrap/10-stack.sh || exit 1
 
-step "gate 2/5  inbound trunk and dispatch rule"
-# Uses the venv if it already exists (so a re-run after 40-agent.sh is clean),
-# otherwise the system python - these scripts only need livekit-api.
-if [ -x venv/bin/python ]; then
-  venv/bin/python bootstrap/20-sip-objects.py || exit 1
-else
-  python3 bootstrap/20-sip-objects.py || {
-    echo "This step needs livekit-api. Run bash bootstrap/40-agent.sh first to build the"
-    echo "venv, then re-run: python3 bootstrap/20-sip-objects.py"
-    exit 1
-  }
-fi
+step "gate 2/5  worker virtualenv, inbound trunk and dispatch rule"
+# The venv comes first: 20-sip-objects.py imports livekit-api, so on a clean machine
+# it cannot run until the venv exists. --no-unit builds (or reuses) it and installs
+# nothing; gate 4 runs 40-agent.sh again for the unit itself.
+bash bootstrap/40-agent.sh --no-unit || exit 1
+venv/bin/python bootstrap/20-sip-objects.py || exit 1
 
 step "gate 3/5  provider: credentials, endpoints, inbound destination"
-if [ -x venv/bin/python ]; then
-  venv/bin/python bootstrap/30-photon.py || exit 1
-else
-  python3 bootstrap/30-photon.py || exit 1
-fi
+venv/bin/python bootstrap/30-photon.py || exit 1
 
 step "gate 4/5  the voice worker"
 bash bootstrap/40-agent.sh || exit 1

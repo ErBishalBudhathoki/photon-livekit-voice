@@ -67,6 +67,31 @@ def store_env(updates: dict[str, str]) -> None:
     ENV_PATH.chmod(0o600)
 
 
+def http_hint(status: int) -> str:
+    """What a status means *for this provider*, in one line.
+
+    Measured against api.photon.codes: a valid key with no User-Agent gets 403
+    (their edge blocks bare clients), a key they do not accept gets 401, and a
+    wrong project or profile id gets 404. Naming the wrong one sends you chasing
+    a credential bug that is not there.
+    """
+    if status == 401:
+        return "  (401: PHOTON_API_KEY is missing, expired, or not accepted)"
+    if status == 403:
+        return ("  (403 from this provider: the request carried no User-Agent, which its "
+                "edge blocks - this script sends one, so check for a proxy stripping it)")
+    if status == 404:
+        return ("  (404: no such route - PHOTON_PROJECT_ID or PHOTON_VOICE_PROFILE_ID is "
+                "wrong, or the profile was deleted)")
+    if status == 422:
+        return ("  (422: an id is malformed - wrong prefix or length, re-copy the project "
+                "and profile ids from the dashboard)")
+    if status == 409:
+        return ("  (409: the profile changed since we read it - expectedVersion is stale, "
+                "just re-run this gate)")
+    return ""
+
+
 def provider(method: str, path: str, body=None, idem: str | None = None):
     key = env("PHOTON_API_KEY")
     data = json.dumps(body).encode() if body is not None else None
@@ -149,6 +174,8 @@ async def main() -> int:
         print(f"  HTTP {status}")
         if status not in (200, 201):
             print(f"  body: {body}")
+            if http_hint(status):
+                print(http_hint(status))
             return 1
         out = body["outbound"]
         conn = out["connection"]
@@ -197,10 +224,16 @@ async def main() -> int:
                   "the trunk to own a number; most providers still accept the call, but the "
                   "callee may see 'unknown'.")
         if existing:
-            updated = await api.sip.update_outbound_trunk_fields(
+            # Same trap as the inbound trunk: this server answers 400 "unsupported
+            # list update operation" for an *empty* list field, so only send numbers
+            # when there is one - an unset SIP_INBOUND_NUMBER would otherwise break
+            # every re-run of this gate.
+            lists = {"numbers": numbers} if numbers else {}
+            update = getattr(api.sip, "update_outbound_trunk_fields", None) \
+                or api.sip.update_sip_outbound_trunk_fields
+            updated = await update(
                 trunk_id=existing.sip_trunk_id, address=address, transport=transport_enum,
-                numbers=numbers, auth_username=user, auth_password=password,
-                name=OUT_TRUNK_NAME)
+                auth_username=user, auth_password=password, name=OUT_TRUNK_NAME, **lists)
             out_trunk_id = updated.sip_trunk_id
             print(f"  updated {out_trunk_id}")
         else:
@@ -243,6 +276,8 @@ async def main() -> int:
     print(f"  HTTP {status}")
     if status not in (200, 201):
         print(f"  body: {body}")
+        if http_hint(status):
+            print(http_hint(status))
         return 1
     inbound = body.get("inbound") or {}
     got = inbound.get("destinationUri")

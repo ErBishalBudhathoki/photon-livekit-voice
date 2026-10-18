@@ -265,13 +265,33 @@ def check_tooling() -> None:
     else:
         record(FAIL, "docker compose plugin", "`docker compose` failed - install the plugin")
 
-    for candidate in ("python3.10", "python3.11", "python3.12"):
-        if shutil.which(candidate):
-            record(PASS, "python for the worker", candidate)
-            break
+    # Any 3.10+ will do: 40-agent.sh pins 3.10 through uv when uv is present, so a
+    # box whose only interpreter is 3.13 is fine. Never hard-code the versions that
+    # exist today - that is how a clean machine reports a working toolchain as
+    # missing, and the first gate is the worst place to lose someone.
+    found = ""
+    for candidate in ("python3", "python3.13", "python3.12", "python3.11", "python3.10"):
+        path = shutil.which(candidate)
+        if not path:
+            continue
+        out = subprocess.run(
+            [path, "-c", "import sys; print('.'.join(str(p) for p in sys.version_info[:3]))"],
+            capture_output=True, text=True)
+        version = (out.stdout or "").strip()
+        try:
+            if out.returncode == 0 and tuple(int(p) for p in version.split(".")[:2]) >= (3, 10):
+                found = f"{candidate} - Python {version}"
+                break
+        except ValueError:
+            continue
+    if found:
+        record(PASS, "python for the worker", found)
+    elif shutil.which("uv"):
+        record(PASS, "python for the worker",
+               "none 3.10+ on PATH - uv will provision 3.10 for the worker venv")
     else:
         record(FAIL, "python for the worker",
-               "no python3.10+ found - the worker needs 3.10 or newer")
+               "no python3.10+ found and no uv - install python3.10+ or uv")
     if shutil.which("uv"):
         record(PASS, "uv available", "used to build the worker venv")
 

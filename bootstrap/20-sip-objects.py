@@ -15,6 +15,10 @@ Two halves, and the second is the one that bites:
 No secret value is printed: username in full, password as a length.
 
     python3 bootstrap/20-sip-objects.py
+
+This gate imports livekit-api, so it needs the worker's virtualenv. install.sh
+builds that venv before this step; by hand, run
+`bash bootstrap/40-agent.sh --no-unit` once first.
 """
 from __future__ import annotations
 
@@ -34,6 +38,21 @@ sys.path.insert(0, str(REPO / "agent"))
 from env import env, load_env_file  # noqa: E402
 
 load_env_file()
+
+# This gate imports livekit-api, but it runs before bootstrap/40-agent.sh in the
+# documented order - so on a clean machine the system python has no livekit SDK at
+# all and the gate died with a bare ModuleNotFoundError that reads like a broken
+# repo. Re-exec into the venv when it exists; when it does not, say which command
+# builds it.
+try:
+    import livekit  # noqa: F401
+except ImportError:
+    _venv = REPO / "venv" / "bin" / "python"
+    if _venv.exists() and Path(sys.executable).resolve() != _venv.resolve():
+        os.execv(str(_venv), [str(_venv), str(Path(__file__).resolve()), *sys.argv[1:]])
+    print("This gate needs the worker's virtualenv (it talks to the LiveKit API).")
+    print(f"Build it first:  bash {REPO}/bootstrap/40-agent.sh --no-unit")
+    sys.exit(1)
 
 from livekit.api import LiveKitAPI  # noqa: E402
 from livekit.protocol import sip as psip  # noqa: E402
@@ -104,6 +123,20 @@ def provider_number() -> str | None:
             data = json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as exc:
         print(f"  number: HTTP {exc.code} from the provider API")
+        # Measured: 401 = key missing/not accepted, 403 = no User-Agent (their edge
+        # blocks bare clients), 404 = wrong project id. This script sends a UA, so a
+        # 403 here points at something stripping the header, not at the key.
+        if exc.code == 401:
+            print("  number: 401 - PHOTON_API_KEY is missing, expired, or not accepted")
+        elif exc.code == 403:
+            print("  number: 403 - this API blocks clients that send no User-Agent and "
+                  "this script sends one, so check for a proxy stripping the header")
+        elif exc.code == 404:
+            print("  number: 404 - PHOTON_PROJECT_ID is wrong, or the project has no "
+                  "voice resource yet")
+        elif exc.code == 422:
+            print("  number: 422 - PHOTON_PROJECT_ID is malformed (wrong prefix or "
+                  "length) - re-copy it from the dashboard")
         return None
     except Exception as exc:  # noqa: BLE001
         print(f"  number: {type(exc).__name__}: {exc}")
@@ -149,13 +182,25 @@ async def main() -> int:
         print("\n=== inbound trunk ===")
         if existing_trunk:
             trunk_id = existing_trunk.sip_trunk_id
-            updated = await api.sip.update_sip_inbound_trunk_fields(
+            # This server refuses an *empty* list field on an update: the SDK still
+            # marks the oneof as "set" and the API answers 400 "unsupported list
+            # update operation". Probing the live server: numbers=[n] -> 200,
+            # allowed_addresses=[] -> 400. So send a list field only when it has
+            # something in it - which also means an unset SIP_ALLOWED_ADDRESSES
+            # leaves any existing allow-list alone instead of wiping it.
+            lists = {}
+            if number:
+                lists["numbers"] = [number]
+            if allowed:
+                lists["allowed_addresses"] = allowed
+            update = getattr(api.sip, "update_inbound_trunk_fields", None) \
+                or api.sip.update_sip_inbound_trunk_fields
+            updated = await update(
                 trunk_id=trunk_id,
-                numbers=[number] if number else [],
-                allowed_addresses=allowed,
                 auth_username=user,
                 auth_password=password,
                 name=IN_TRUNK_NAME,
+                **lists,
             )
             print(f"  updated {trunk_id}: numbers={list(updated.numbers)} "
                   f"allowed={list(updated.allowed_addresses)}")
