@@ -116,6 +116,11 @@ configs that contain one are written mode 600.
 # a room with no telephony at all - free, and the only way to test the agent alone
 venv/bin/python tests/room_test.py
 
+# inbound, without a phone line or a provider: it plays the carrier's SBC over TLS,
+# answers the digest challenge with the trunk's own credential, and checks that the
+# dispatch rule makes a room and the worker greets in it
+venv/bin/python tests/inbound_sim.py
+
 # call your own number, no instruction needed
 venv/bin/python cli/call_cli.py --mode callme
 
@@ -179,7 +184,7 @@ agent/agent.py                 the voice worker (s2s)
 agent/env.py                   dependency-free .env loader
 cli/call_cli.py                the dialer
 surface/hermes-plugin/         /callme, /call, /calllog + the briefing watcher
-tests/                         room test, briefing tests, fake callee, probes
+tests/                         room test, inbound sim, briefing tests, fake callee, probes
 templates/                     compose, livekit.yaml, sip.yaml, systemd unit
 docs/TROUBLESHOOTING.md        symptom -> layer -> fix
 ```
