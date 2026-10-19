@@ -23,3 +23,22 @@ __pycache__/
 *.bak
 *.bak.*
 .uv/
+
+# Local-only: install identifiers the scanner refuses to see in tracked files.
+/.secretscan
+
+# Credential and key files of every kind, plus editor/OS droppings.
+*.env
+!/.env.example
+id_rsa*
+id_ed25519*
+.netrc
+.pgpass
+*.session
+*.p12
+*.pfx
+*.jks
+*.ovpn
+.DS_Store
+*.swp
+.pytest_cache/

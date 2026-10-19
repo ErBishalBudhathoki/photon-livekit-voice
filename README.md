@@ -185,9 +185,31 @@ agent/env.py                   dependency-free .env loader
 cli/call_cli.py                the dialer
 surface/hermes-plugin/         /callme, /call, /calllog + the briefing watcher
 tests/                         room test, inbound sim, briefing tests, fake callee, probes
+scripts/secret-scan.py         refuses to publish a secret (files, history, staged)
+scripts/install-hooks.sh       installs the pre-commit and pre-push scan
 templates/                     compose, livekit.yaml, sip.yaml, systemd unit
 docs/TROUBLESHOOTING.md        symptom -> layer -> fix
+SECURITY.md                    what holds a secret, rotation order, what is never pushed
 ```
+
+## Keeping secrets out of git
+
+Every live value lives in `.env`, `certs/` or `calls/` - all gitignored, and every
+script that writes `.env` chmods it to `600` in the same step. That is the design;
+`scripts/secret-scan.py` is the proof. It scans the files git would push, every
+added line of every commit, and matches against the live values in your `.env`:
+
+```bash
+python3 scripts/secret-scan.py            # files + full history
+python3 scripts/secret-scan.py --staged   # exactly what a commit would add
+bash scripts/install-hooks.sh             # do it automatically on commit and push
+```
+
+List your own identifiers - hostname, public IP, provider project id, phone number
+- in `.secretscan` (gitignored) and `--strict` will refuse to publish those too.
+`.github/workflows/secret-scan.yml` runs the same scan on every push, so
+`git commit --no-verify` does not get a secret past it. Details, including the
+rotation order for each credential: [SECURITY.md](SECURITY.md).
 
 ## Versions
 
