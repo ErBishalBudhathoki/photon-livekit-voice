@@ -1,223 +1,302 @@
 # photon-livekit-voice
 
-Give an AI agent a phone number. It answers inbound calls, places outbound ones,
-and reports back what was said.
+A telephone agent you can actually call. LiveKit carries the audio, a carrier
+trunk connects it to the phone network, and Gemini Live does the talking - speech
+to speech, no separate STT/TTS chain. It places outbound calls, answers inbound
+ones, writes a transcript of each, and can post a short briefing about what
+happened back into your chat.
 
-Speech-to-speech over the Gemini Live API, carried by a self-hosted LiveKit + SIP
-stack, on a number from [photon.codes](https://photon.codes). No local STT/TTS, no
-VAD tuning, no pipeline of four models to keep in sync - audio goes in, audio comes
-out, and the model drives the conversation.
+Self-hosted: one Linux box with docker, a public IP and a SIP number. No SaaS in
+the audio path except the model.
 
 ```
-  caller ──PSTN──▶ carrier ──SIP/TLS──▶ livekit-sip ──▶ livekit-server ──▶ worker
-                                                                          │
-                                                            Gemini Live ◀─┘ (s2s)
-                                                                          │
-  chat  ◀──── post-call transcript ◀── calls/<room>.jsonl ◀───────────────┘
+    caller ──PSTN──▶ carrier SBC ──SIP/TLS 5061──▶ livekit-sip ──▶ livekit-server ──▶ agent worker
+                                                    ▲                   │                  │
+                                              RTP 10000-10100          │                  │
+                                                                  transcript         Gemini Live
+                                                                     │
+    your chat ◀──── briefing (optional plugin) ◀──────────────────────┘
 ```
 
 ## What you get
 
-- **Inbound**: calls to your number ring a room and the agent answers.
-- **Outbound**: place a call with an instruction, and the agent carries it out.
-- **Chat commands** (Hermes): `/callme`, `/call <number> <instruction>`, `/calllog`.
-- **Post-call briefing**: when the call ends, the transcript is posted back into
-  the conversation the command came from.
-- **Machine handling**: an answering machine gets hung up on, not talked at.
+- **Outbound calls** from a CLI or a chat command, with a brief the agent follows.
+  Ring is non-blocking, so a slow carrier does not time the call out.
+- **Inbound calls** answered by the agent, with delegation off by default.
+- **A transcript per call** (`calls/<room>.jsonl`: `call`, `answered`, `said`,
+  `heard`, `ended`), which is what the briefing is built from.
+- **Guards that came from real failures**: the agent waits for the line to be
+  actually answered before speaking, refuses to hang up early, drops voicemail
+  rather than leaving a message, and never leaves a caller hearing silence.
+- **Gates instead of a script.** Each install step verifies the layer below it and
+  stops at the first failure, because every failure mode here is silent.
+- **Tests that need no phone line**: a room test (driverless audio check) and an
+  inbound simulation that plays the carrier's SBC over TLS.
 
-## What this does not do
+## What it is not
 
-Read this before you start; the honest split is roughly 40% code and 60% things
-only you can do.
-
-- **You need a number from photon.codes**, already voice-eligible. No script here
-  can create one, and a project with `lineCount: 0` cannot carry a call.
-- **Your host needs a public IP** and a hostname whose A record is **not proxied
-  by Cloudflare**. SIP cannot cross the proxy - the orange cloud breaks calls
-  silently, with no error anywhere.
-- **The carrier's trunk uses TLS**, so that hostname needs a publicly trusted
-  certificate. `bootstrap/cert-acme.sh` issues one over DNS-01, which is why it
-  needs a Cloudflare token: port 80 never has to be open.
-- **Two firewalls, not one.** The host's own firewall *and* your cloud provider's
-  security list / firewall rules must both allow the SIP port, the SIP TLS port
-  and the RTP UDP range from `sip.yaml`.
-- **Gemini Live bills by tokens per minute** (65K on the free tier). Two calls at
-  once can trip `1011 Resource has been exhausted` - that is the ceiling, not a
-  bug in this repo.
-- The AI voice is good but not a person. Tell people they are talking to one.
+- Not a hosted service. You run it; you pay the carrier per minute and the model
+  per token.
+- Not multi-tenant. One number, one agent, one owner.
+- Not telephony-provider specific in principle, but the installer automates
+  **Photon** (photon.codes) and expects a LiveKit-compatible SIP trunk elsewhere.
 
 ## Requirements
 
-| | |
-|---|---|
-| Host | Linux, public IPv4, 2 GB RAM, ports 7880/7881/5060/5061 free |
-| Docker | with the `compose` plugin |
-| Python | 3.10+ (`uv` optional, and much faster) |
-| Accounts | photon.codes project + voice line, Gemini API key |
-| DNS | a hostname on a domain you control, grey cloud, pointing at the host |
+**Host**
 
-## Install
+- Linux with docker + compose v2, `systemd --user` with linger enabled
+  (`loginctl enable-linger $USER`) - the worker is a user unit.
+- A public IPv4 and a DNS name pointing at it, for inbound. Outbound alone works
+  behind NAT.
+- The DNS record must be **grey cloud / DNS-only**. A proxied record breaks SIP
+  with no error.
+- Open inbound: `5061/tcp` (SIP over TLS), `10000-10100/udp` (RTP). Both the cloud
+  security list and the host firewall - two layers, both easy to forget.
+- Ports used locally: `7880` API/WS, `7881/tcp` RTC, `7882/udp` media, `5060`
+  plain SIP, `6380` redis, `8083` worker health.
+- Python 3.10+ (the installer prefers `uv` and pins CPython 3.10 for the venv).
+
+**Accounts**
+
+| Thing | Why | Where |
+| --- | --- | --- |
+| A SIP number with a voice-eligible line | the phone number itself | Photon (or any LiveKit SIP trunk provider) |
+| A Gemini API key | speech-to-speech | aistudio.google.com |
+| DNS + a certificate | the carrier connects over TLS | your DNS host; DNS-01 via Cloudflare is automated |
+
+A certificate is issued by `bootstrap/cert-acme.sh` (Let's Encrypt, DNS-01 by
+default so port 80 never opens). It must be publicly trusted: a self-signed cert
+is fine for testing but a carrier will refuse it.
+
+**Cost**: carrier per minute, model per token (Live's free tier is bounded by
+**tokens per minute**, so overlapping calls fail with error 1011), plus the box.
+
+## Quick start
 
 ```bash
-git clone <this repo> ~/photon-livekit-voice
-cd ~/photon-livekit-voice
+git clone <this repo> photon-livekit-voice && cd photon-livekit-voice
 
-cp .env.example .env
-chmod 600 .env
-$EDITOR .env                 # fill in the values below
+cp .env.example .env && chmod 600 .env
+$EDITOR .env                     # fill the six required keys, see below
 
-bash install.sh
+bash install.sh                  # gates 0-5, stops at the first failure
 ```
 
-`install.sh` runs five gates in order and stops at the first failure. Each gate
-verifies the layer beneath it before going on, because every failure mode in this
-stack is silent: a stack that is "up" with no trunk, a trunk whose credentials
-401, a worker that starts and never registers, a number that rings and carries no
-audio. To re-verify an existing install without changing anything:
+The six keys that matter on a first run - everything else has a working default:
 
-```bash
-bash install.sh --check
+```ini
+SIP_DOMAIN=sip.example.com       # your DNS name, grey-cloud A record
+ACME_EMAIL=you@example.com       # where the CA reaches you
+CLOUDFLARE_API_TOKEN=            # only for DNS-01 issuance; else leave empty
+GEMINI_API_KEY=AIza...           # aistudio.google.com/apikey
+PHOTON_API_KEY=                  # provider dashboard
+PHOTON_PROJECT_ID=pho_prj_...    # provider dashboard URL
+PHOTON_VOICE_PROFILE_ID=pho_vpf_...
 ```
 
-### The `.env` contract
+`LIVEKIT_API_KEY`/`SECRET` are generated for you; leave them blank.
 
-| Key | What it is |
-|---|---|
-| `SIP_DOMAIN` | hostname the carrier sends INVITEs to - grey cloud, cert must match |
-| `PUBLIC_IP` | this host's public IPv4 (detected if empty) |
-| `ACME_EMAIL` | contact for the certificate |
-| `CLOUDFLARE_API_TOKEN` | `Zone:DNS:Edit`, only for issuing the cert over DNS-01 |
-| `PHOTON_API_KEY` / `PHOTON_PROJECT_ID` / `PHOTON_VOICE_PROFILE_ID` | provider credentials and the voice profile to configure |
-| `GEMINI_API_KEY` | Gemini Live (the voice backend) |
-| `OWNER_NUMBER` | your own number, so `/callme` has somewhere to dial |
-| `DEFAULT_COUNTRY_CODE` | expands local-format numbers, e.g. `61` |
-| `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | generated into `.env` by the first gate |
-| `SIP_INBOUND_USER` / `SIP_INBOUND_PASS` | generated by gate 2, then pushed to the provider by gate 3 |
-| `SIP_OUTBOUND_*` | written by gate 3 from what the provider issues |
-
-The bootstrap scripts print lengths and masked values only, never a secret. Rendered
-configs that contain one are written mode 600.
-
-### The gates
-
-| Gate | Script | Proves |
-|---|---|---|
-| 0 | `bootstrap/00-preflight.py` | `.env` complete, DNS not proxied, cert covers the name, ports free, provider line voice-eligible |
-| 1 | `bootstrap/10-stack.sh` | renders configs, starts redis/livekit/sip, API answers, no crash loop |
-| 2 | `bootstrap/40-agent.sh --no-unit` then `bootstrap/20-sip-objects.py` | the worker venv exists (gate 2 imports `livekit-api`, so it cannot run without it), then: inbound trunk + dispatch rule exist, and the trunk's credentials equal `.env` |
-| 3 | `bootstrap/30-photon.py` | provider outbound credential issued, LiveKit trunk created, provider inbound destination points back here |
-| 4 | `bootstrap/40-agent.sh` | worker venv built, service installed, **"registered worker" seen in the log** |
-| 5 | `bootstrap/50-dialer.sh` | the dialer reaches the API and sees the trunk |
-| - | `bootstrap/90-check.py` | the whole ladder again, read-only, against a running install |
-
-## Calling
+Then check it without spending a cent:
 
 ```bash
-# a room with no telephony at all - free, and the only way to test the agent alone
-venv/bin/python tests/room_test.py
+venv/bin/python tests/room_test.py        # the agent speaks into a room, no telephony
+venv/bin/python tests/inbound_sim.py      # a fake carrier INVITE, no phone line
+bash install.sh --check                   # the whole ladder, read-only
+```
 
-# inbound, without a phone line or a provider: it plays the carrier's SBC over TLS,
-# answers the digest challenge with the trunk's own credential, and checks that the
-# dispatch rule makes a room and the worker greets in it
-venv/bin/python tests/inbound_sim.py
+## The gates
 
-# call your own number, no instruction needed
+`install.sh` runs them in order. Each one can also be run alone; none of them
+print a credential (lengths and masked values only).
+
+| Gate | Command | Proves |
+| --- | --- | --- |
+| 0 | `python3 bootstrap/00-preflight.py` | config parses, DNS resolves to this host, the cert covers `SIP_DOMAIN`, ports are free, the provider line is voice-eligible |
+| 1 | `bash bootstrap/10-stack.sh` | redis + livekit-server + livekit-sip are up and the API answers on 7880 |
+| 2 | `bash bootstrap/40-agent.sh --no-unit` then `venv/bin/python bootstrap/20-sip-objects.py` | the worker venv exists (this gate imports the SDK), the inbound trunk and dispatch rule exist, and the trunk's credential equals `.env` |
+| 3 | `venv/bin/python bootstrap/30-photon.py` | the provider issued an outbound credential, the LiveKit outbound trunk exists, and the provider's inbound destination points back at this host |
+| 4 | `bash bootstrap/40-agent.sh` | the worker venv is built, the unit is installed and enabled, and **"registered worker" appears in the log** |
+| 5 | `bash bootstrap/50-dialer.sh` | the dialer can reach the API and sees the trunk with the right address |
+
+Gate 3 writes to the provider. Run it on the host that should receive calls, and
+nowhere else - on a test box it will point your live number at the test box.
+
+## Placing a call
+
+```bash
+# your own number, no brief (needs OWNER_NUMBER in .env)
 venv/bin/python cli/call_cli.py --mode callme
 
-# call someone else with an instruction
-venv/bin/python cli/call_cli.py --to +61400000000 \
-  --instruction 'ask whether they are open on Saturday and what time'
+# someone else, with a brief the agent follows
+venv/bin/python cli/call_cli.py --to +15555550100 \
+  --instruction 'ask whether they are open on Saturday and until what time'
+
+# local number, expanded with DEFAULT_COUNTRY_CODE
+venv/bin/python cli/call_cli.py --to 0456789012 --instruction 'confirm the booking'
+
+# what is already in the trunk, no call
+venv/bin/python cli/call_cli.py --list
 ```
 
-The dialer creates the room first with the brief in its metadata and *then* adds the
-SIP participant. The worker reads the brief at entrypoint, so it knows what it is
-doing before the line is answered. It does not block waiting for the far end: the
-INVITE goes out, and the worker's own answered-gate decides when there is someone
-to talk to. Waiting for an answer in the dialer is what produced the classic
-`408 sip request timed out` on a phone that just took 36 seconds to ring.
+`--wait` holds the process until the call ends, `--json` gives machine-readable
+output, `--ring-timeout` changes the 45s window, `--mode room` creates a room with
+no phone leg.
 
-## Hermes integration
+The order matters: the room is created first with the brief in its metadata, then
+the phone leg is added. If the dial times out the room stays, and the transcript
+tells you why.
+
+## Receiving a call
+
+Inbound needs the same trunk plus a dispatch rule that turns an INVITE into a room
+(`ROOM_PREFIX`, default `call-`). Gate 2 creates both; gate 3 tells the provider
+where to send calls.
+
+```bash
+# prove the whole inbound path with no phone line and no provider
+venv/bin/python tests/inbound_sim.py
+```
+
+It opens TLS to `5061`, sends an INVITE for the number the trunk owns, answers the
+trunk's `407` digest challenge with the trunk's own credential, then asserts:
+`200 OK` → the dispatch rule created a room → the worker joined → the agent greeted
+→ the transcript has `call`, `answered`, `said`. Seven checks, exit code 1 on any
+failure.
+
+What it cannot prove - and what the gate table calls host/provider items: public
+DNS, a certificate the carrier trusts, published ports, and the provider's inbound
+destination.
+
+**Delegation is off by default.** Anyone who can reach the number can talk to the
+agent; by default it can only talk back. Enabling delegation lets a caller drive a
+local agent session, so it requires an explicit allowlist:
+
+```ini
+AGENT_DELEGATION_ENABLED=true
+AGENT_DELEGATION_ALLOWLIST=+15555550100,+15555550101   # last 9 digits are compared
+```
+
+With delegation on and an empty allowlist every caller is allowed. Do not do that.
+
+## Chat commands (optional)
 
 ```bash
 bash surface/hermes-plugin/install.sh
 ```
 
-Adds `/callme`, `/call <number> <instruction>` and `/calllog [room]` to a Hermes
-profile. The plugin shells out to `cli/call_cli.py` in this repo (set
-`PHOTON_VOICE_DIR` if it lives somewhere else) and starts a watcher that polls the
-call's transcript file and posts the briefing back into the same conversation when
-the call ends.
-
-Two things it needs from Hermes:
-
-- `plugins.entries.voice-call.allow_gateway_injection: true` - injecting a message
-  into a live conversation is privileged, and it is off by default.
-- the plugin directory must be enabled in `plugins.entries`.
-
-## Inbound security
-
-Inbound ships with **delegation off**. Anyone who can reach the number can talk to
-the agent, so by default it can only talk back. Delegation - letting the caller ask
-the agent to *do* something - requires an explicit caller-ID allowlist:
-
-```bash
-AGENT_DELEGATION=1
-AGENT_DELEGATION_ALLOWLIST=+61400000000,+61400000001
-```
-
-With an empty allowlist and delegation on, every caller is allowed. Do not do that.
-
-## Files
+Adds three commands to a Hermes profile:
 
 ```
-install.sh                     five gates, in order
-bootstrap/00-preflight.py      gate 0
-bootstrap/10-stack.sh          gate 1  (renders configs, starts the stack)
-bootstrap/20-sip-objects.py    gate 2  (LiveKit SIP objects + credential check)
-bootstrap/30-photon.py         gate 3  (provider credential + inbound destination)
-bootstrap/40-agent.sh          gate 4  (worker venv, service, registration)
-bootstrap/50-dialer.sh         gate 5  (the dialer's view of the trunk)
-bootstrap/90-check.py          the ladder, read-only
+/callme [why]            ring your own phone
+/call <number> <reason>  ring that number with the reason as the brief
+/calllog [room]          reprint a call's transcript
+```
+
+The plugin shells out to `cli/call_cli.py` (set `PHOTON_VOICE_DIR` if the repo
+lives elsewhere) and starts a watcher that polls the transcript and posts a
+briefing into the same conversation when the call ends. Two prerequisites in
+Hermes config:
+
+```yaml
+plugins:
+  entries:
+    voice-call:
+      enabled: true
+      allow_gateway_injection: true     # posting into a live conversation is privileged
+```
+
+Without Hermes, everything still works from the CLI - the plugin is a surface, not
+the product.
+
+## Configuration
+
+`.env.example` is the reference: every key, what it does, where the value comes
+from, and a sample shape. Copy it to `.env` and treat that as the only source of
+truth - the compose file, the gates, the worker and the plugin all read it.
+
+The settings worth knowing:
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `AGENT_MIN_TALK_S` | 12 | `end_call` is refused until the agent has spoken and the line has been up this long |
+| `AGENT_MACHINE_MIN_S` | 6 | a "this is a machine" verdict may hang up earlier, but never sooner than this |
+| `AGENT_HANGUP_GRACE_S` | 3.5 | the line stays up briefly after `end_call`, so the farewell is not cut off |
+| `AGENT_S2S_VOICE` | Puck | Gemini Live voice |
+| `DEFAULT_COUNTRY_CODE` | 61 | expands local-form numbers typed into `/call` |
+| `SIP_ALLOWED_ADDRESSES` | empty | restrict inbound to carrier IPs/CIDRs |
+
+Configs are rendered from `templates/` by `bootstrap/render.py`, which refuses to
+write a file that still contains a `__PLACEHOLDER__` and chmods credential-bearing
+files 600. Do not hand-edit `livekit.yaml`, `sip.yaml` or `docker-compose.yaml` -
+they are generated and gitignored.
+
+## Troubleshooting
+
+Full symptom → layer → fix table: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+The ones that catch everybody:
+
+- **Calls connect but nobody hears the agent.** RTP range not open inbound, or the
+  greeting fired before the line was answered. The agent waits for
+  `sip.callStatus=active`; check the RTP range in *both* firewall layers.
+- **Silence mid-call, then the call dies.** Gemini Live error 1011 - the
+  tokens-per-minute ceiling. Serialise calls; nothing else fixes it.
+- **Outbound fails instantly with 401.** Trunk credential does not match the
+  provider. Gate 2 compares them; re-run gate 3 to re-sync.
+- **Inbound rings and 403s.** The provider's inbound destination does not point at
+  this host, or its credential differs from the trunk's. Gate 3 sets both; the
+  ladder checks both.
+- **The briefing never appears in chat.** The transcript directory the plugin reads
+  differs from the worker's, or `allow_gateway_injection` is off.
+
+## Security
+
+`.env`, `certs/`, `calls/` and every rendered config are gitignored, written 600,
+and `scripts/secret-scan.py` proves it - it scans the files a push would send, the
+full commit history, and matches against the live values in your `.env`.
+`scripts/install-hooks.sh` wires that into `pre-commit` and `pre-push`, and
+`.github/workflows/secret-scan.yml` runs it again on every push.
+
+Full model - what holds a secret, rotation order per credential, what to do if one
+leaks: [SECURITY.md](SECURITY.md).
+
+## Project layout
+
+```
+install.sh                     six gates, in order, stop at the first failure
+bootstrap/00-preflight.py      gate 0  config, DNS, cert, ports, provider line
+bootstrap/10-stack.sh          gate 1  renders configs, starts the stack
+bootstrap/20-sip-objects.py    gate 2  inbound trunk + dispatch rule + credential check
+bootstrap/30-photon.py         gate 3  provider credential + inbound destination
+bootstrap/40-agent.sh          gate 4  worker venv, systemd unit, registration
+bootstrap/50-dialer.sh         gate 5  the dialer's view of the trunk
+bootstrap/90-check.py          the ladder, read-only, 20 checks
 bootstrap/cert-acme.sh         certificate over DNS-01
-bootstrap/render.py            templates -> configs, refuses to leave a placeholder
-agent/agent.py                 the voice worker (s2s)
+bootstrap/render.py            templates -> configs, mode 600, refuses placeholders
+agent/agent.py                 the voice worker (speech to speech)
 agent/env.py                   dependency-free .env loader
 cli/call_cli.py                the dialer
+surface/cli/voice              thin shell wrapper around the dialer
 surface/hermes-plugin/         /callme, /call, /calllog + the briefing watcher
-tests/                         room test, inbound sim, briefing tests, fake callee, probes
-scripts/secret-scan.py         refuses to publish a secret (files, history, staged)
-scripts/install-hooks.sh       installs the pre-commit and pre-push scan
+tests/                         room test, inbound sim, briefing tests, probes
 templates/                     compose, livekit.yaml, sip.yaml, systemd unit
+scripts/                       secret-scan.py, install-hooks.sh
 docs/TROUBLESHOOTING.md        symptom -> layer -> fix
-SECURITY.md                    what holds a secret, rotation order, what is never pushed
+SECURITY.md                    secret model, rotation, disclosure
+SKILLS.md                      agent-facing playbook: run it, verify it, fix it
 ```
 
-## Keeping secrets out of git
+## Pinned versions
 
-Every live value lives in `.env`, `certs/` or `calls/` - all gitignored, and every
-script that writes `.env` chmods it to `600` in the same step. That is the design;
-`scripts/secret-scan.py` is the proof. It scans the files git would push, every
-added line of every commit, and matches against the live values in your `.env`:
+`requirements.txt` pins the SDK on purpose. `livekit-agents` and its plugins move
+fast, and the answered-gate depends on a protocol-level participant attribute, so a
+silent minor bump can change call behaviour without breaking the install. Bump one
+line at a time and re-run `bootstrap/90-check.py` and the two telephony-free tests
+before trusting it.
 
-```bash
-python3 scripts/secret-scan.py            # files + full history
-python3 scripts/secret-scan.py --staged   # exactly what a commit would add
-bash scripts/install-hooks.sh             # do it automatically on commit and push
-```
-
-List your own identifiers - hostname, public IP, provider project id, phone number
-- in `.secretscan` (gitignored) and `--strict` will refuse to publish those too.
-`.github/workflows/secret-scan.yml` runs the same scan on every push, so
-`git commit --no-verify` does not get a secret past it. Details, including the
-rotation order for each credential: [SECURITY.md](SECURITY.md).
-
-## Versions
-
-Pinned on purpose in `requirements.txt`. The answered-gate reads the
-`sip.callStatus` participant attribute, which is a protocol-level detail, so a
-silent bump can change call behaviour without breaking the install. Re-run
-`bootstrap/90-check.py` after any dependency change.
+Server images are pinned by tag in `.env` (`LIVEKIT_SERVER_TAG`,
+`LIVEKIT_SIP_TAG`) for the same reason.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT - see [LICENSE](LICENSE).
