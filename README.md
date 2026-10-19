@@ -9,14 +9,11 @@ happened back into your chat.
 Self-hosted: one Linux box with docker, a public IP and a SIP number. No SaaS in
 the audio path except the model.
 
-```
-    caller ──PSTN──▶ carrier SBC ──SIP/TLS 5061──▶ livekit-sip ──▶ livekit-server ──▶ agent worker
-                                                    ▲                   │                  │
-                                              RTP 10000-10100          │                  │
-                                                                  transcript         Gemini Live
-                                                                     │
-    your chat ◀──── briefing (optional plugin) ◀──────────────────────┘
-```
+![Architecture: carrier SBC to livekit-sip over SIP/TLS, livekit-server dispatches the worker, the worker talks to Gemini Live and writes the transcript](docs/architecture.svg)
+
+*One host. The carrier reaches `livekit-sip` on 5061/tcp and sends RTP to
+10000-10100/udp; everything else is loopback. Full-size image:
+[docs/architecture.svg](docs/architecture.svg).*
 
 ## What you get
 
@@ -32,6 +29,57 @@ the audio path except the model.
   stops at the first failure, because every failure mode here is silent.
 - **Tests that need no phone line**: a room test (driverless audio check) and an
   inbound simulation that plays the carrier's SBC over TLS.
+
+## How a call flows
+
+Outbound - the room exists before the phone rings, so the brief is waiting when
+the call is answered:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as You - CLI or chat
+    participant D as call_cli.py
+    participant LK as livekit-server
+    participant W as agent worker
+    participant C as Callee
+    U->>D: to +15555550100, brief 'confirm the booking'
+    D->>LK: create room, brief in the metadata
+    D->>LK: add SIP participant through the outbound trunk
+    LK->>C: INVITE, then ring (45s window)
+    C-->>LK: 200 OK
+    LK->>W: dispatch a job for that room
+    W->>W: wait for sip.callStatus=active
+    W->>C: first turn, generated from the brief
+    C->>W: speech
+    W->>LK: append to the transcript as it goes
+    W->>C: end_call, farewell, hang up
+```
+
+Inbound - the trunk challenges before it will accept anything, and the dispatch
+rule is what turns an INVITE into a room:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant S as Carrier SBC
+    participant P as livekit-sip
+    participant LK as livekit-server
+    participant W as agent worker
+    C->>S: dials the number
+    S->>P: INVITE over TLS 5061
+    P-->>S: 407, digest challenge
+    S->>P: INVITE with the trunk credential
+    P->>LK: number match, dispatch rule applies
+    LK->>LK: room call-N
+    P-->>S: 180 Ringing, 200 OK
+    LK->>W: worker joins the room
+    W->>C: greeting (or the fixed AGENT_INBOUND_GREETING)
+```
+
+RTP flows both ways alongside those messages; if the media range is not open in
+both firewall layers, the call sets up and carries no audio.
 
 ## What it is not
 
